@@ -1,15 +1,18 @@
 /**
-  Read and write Stata .dta files.
+  Read and write Stata version 6.0 .dta files.
   
   (c) 1999 Thomas Lumley. 
 
   The format of Stata files is documented under 'file formats' 
   in the Stata manual.
 
-  This code currently does not write string variables, does
-  not make use of the print format or value label information
-  in a .dta file, and does not handle reading from a file written
-  on a machine with different byte-ordering.
+  This code currently does not make use of the print format or value
+  label information in a .dta file, and does not handle reading from a
+  file written on a machine with different byte-ordering or with 'int'
+  'float' or 'double' that differ from IEEE 4-byte integer, 4-byte
+  real and 8-byte real respectively. 
+
+  Versions of Stata before 6.0 used different file formats.
 
 **/
 
@@ -43,7 +46,7 @@ typedef union
 } ieee_double;
 
 
-static int setup_consts()
+static void setup_consts()
 {
     ieee_double x;
     x.value = 1;
@@ -66,7 +69,7 @@ static int setup_consts()
       Variable labels go to attributes of the data frame
 
       value labels and characteristics could go as attributes of the variables 
-      not yet
+      not yet implemented
 ****/
 
 
@@ -75,7 +78,7 @@ static int InIntegerBinary(FILE * fp, int naok)
     int i;
     if (fread(&i, sizeof(int), 1, fp) != 1)
 	error("a binary read error occured");
-    return (i==STATA_INT_NA & !naok ? NA_INTEGER : i);
+    return ((i==STATA_INT_NA) & !naok ? NA_INTEGER : i);
 }
 
 static int InByteBinary(FILE * fp, int naok)
@@ -83,7 +86,7 @@ static int InByteBinary(FILE * fp, int naok)
     unsigned char i;
     if (fread(&i, sizeof(char), 1, fp) != 1)
 	error("a binary read error occured");
-    return  (i==STATA_BYTE_NA & !naok ? NA_INTEGER : (int) i);
+    return  ((i==STATA_BYTE_NA) & !naok ? NA_INTEGER : (int) i);
 }
 
 static int InShortIntBinary(FILE * fp, int naok)
@@ -99,7 +102,7 @@ static int InShortIntBinary(FILE * fp, int naok)
     second=(char) second;
     result=second*256+first;
   }
-  return (result==STATA_SHORTINT_NA & !naok ? NA_INTEGER  : result);
+  return ((result==STATA_SHORTINT_NA) & !naok ? NA_INTEGER  : result);
 }
 
 
@@ -108,7 +111,7 @@ static double InDoubleBinary(FILE * fp, int naok)
     double i;
     if (fread(&i, sizeof(double), 1, fp) != 1)
 	error("a binary read error occured");
-    return (i==STATA_DOUBLE_NA & !naok ? NA_REAL : i);
+    return ((i==STATA_DOUBLE_NA) & !naok ? NA_REAL : i);
 }
 
 static double InFloatBinary(FILE * fp, int naok)
@@ -116,7 +119,7 @@ static double InFloatBinary(FILE * fp, int naok)
     float i;
     if (fread(&i, sizeof(float), 1, fp) != 1)
 	error("a binary read error occured");
-    return (i==STATA_FLOAT_NA & !naok ? NA_REAL : (double) i);
+    return ((i==STATA_FLOAT_NA) & !naok ? NA_REAL : (double) i);
 }
 
 static void InStringBinary(FILE * fp, int nchar, char* buffer)
@@ -126,7 +129,6 @@ static void InStringBinary(FILE * fp, int nchar, char* buffer)
 }
 
 static char* nameMangle(char *stataname, int len){
-    char c;
     int i;
     for(i=0;i<len;i++)
       if (stataname[i]=='_') stataname[i]='.';
@@ -137,11 +139,10 @@ static char* nameMangle(char *stataname, int len){
 
 SEXP R_LoadStataData(FILE *fp)
 {
-    int i,j,anint,nvar,nobs,charlen,stata_endian;
+    int i,j,nvar,nobs,charlen,stata_endian;
     unsigned char abyte;
     char datalabel[81], timestamp[18], aname[9];
-    double anumeric;
-    SEXP df,names,tmp,varlabels,vallabels,types,row_names;
+    SEXP df,names,tmp,varlabels,types,row_names;
     
     setup_consts();  /*endianness*/
 
@@ -304,7 +305,7 @@ SEXP R_LoadStataData(FILE *fp)
     setAttrib(df, R_RowNamesSymbol, row_names);
     UNPROTECT(1);     
 
-    UNPROTECT(2);
+    UNPROTECT(2); /* types, df */
 
     return(df);
 
@@ -314,7 +315,7 @@ SEXP do_readStata(SEXP call)
     SEXP fname,  result;
     FILE *fp;
 
-    if (sizeof(double)!=8 | sizeof(int)!=4 | sizeof(float)!=4)
+    if ((sizeof(double)!=8) | (sizeof(int)!=4) | (sizeof(float)!=4))
       errorcall(call,"can't yet read Stata .dta on this platform");
 
 
@@ -334,7 +335,7 @@ SEXP do_readStata(SEXP call)
 
 static void OutIntegerBinary(int i, FILE * fp, int naok)
 {
-    i=(i==NA_INTEGER & !naok ? STATA_INT_NA : i);
+    i=((i==NA_INTEGER) & !naok ? STATA_INT_NA : i);
     if (fwrite(&i, sizeof(int), 1, fp) != 1)
 	error("a binary write error occured");
 
@@ -365,7 +366,7 @@ static void OutShortIntBinary(int i,FILE * fp)
 }
 
 
-static double OutDoubleBinary(double d, FILE * fp, int naok)
+static void  OutDoubleBinary(double d, FILE * fp, int naok)
 {
     d=(R_FINITE(d) ? d : STATA_DOUBLE_NA);
     if (fwrite(&d, sizeof(double), 1, fp) != 1)
@@ -380,7 +381,6 @@ static void OutStringBinary(char *buffer, FILE * fp, int nchar)
 }
 
 static char* nameMangleOut(char *stataname, int len){
-    char c;
     int i;
     for(i=0;i<len;i++){
       if (stataname[i]=='.') stataname[i]='_';
@@ -390,15 +390,14 @@ static char* nameMangleOut(char *stataname, int len){
 
 void R_SaveStataData(FILE *fp, SEXP df)
 {
-    int i,j,anint,nvar,nobs,charlen,stata_endian,l,k;
-    unsigned char abyte;
+    int i,j,k,l,nvar,nobs,charlen;
     char datalabel[81]="Written by R.              ", timestamp[18], aname[9];
-    double anumeric;
+    char format9g[12]="%9.0g", strformat[12]="";
+    SEXP names,types;
+    
+    k=0; /* -Wall */
 
-    char format9g[12]="%9.0g";
-    
-    SEXP names,tmp,varlabels,vallabels,types,row_names;
-    
+
     setup_consts();  /*endianness*/
 
     /** first write the header **/
@@ -469,9 +468,15 @@ void R_SaveStataData(FILE *fp, SEXP df)
         OutByteBinary(0,fp);
     
     /** format list: pick a format, any format   **/
-
+    /** we know that the string types are at most 128 characters
+	so we can't get a buffer overflow in sprintf **/
     for (i=0;i<nvar;i++){
-      OutStringBinary(format9g,fp,12);
+        if (TYPEOF(VECTOR(df)[i])==STRSXP){
+	    sprintf(strformat,"%%%ds",INTEGER(types)[i]);
+	    OutStringBinary(strformat,fp,12);
+	} else { 
+	    OutStringBinary(format9g,fp,12);
+	}
     }
 
     /** value labels.  These are stored as the names of label formats, 
@@ -488,7 +493,7 @@ void R_SaveStataData(FILE *fp, SEXP df)
      
 
     for(i=0;i<nvar;i++) {
-        snprintf(datalabel,81,"%s",CHAR(STRING(names)[i]));
+        strncpy(datalabel,CHAR(STRING(names)[i]),81);
 	datalabel[80]=(char) 0;
         OutStringBinary(datalabel,fp,81);
     }
@@ -540,7 +545,7 @@ SEXP do_writeStata(SEXP call)
     SEXP fname,  df;
     FILE *fp;
 
-    if (sizeof(double)!=8 | sizeof(int)!=4 | sizeof(float)!=4)
+    if ((sizeof(double)!=8) | (sizeof(int)!=4) | (sizeof(float)!=4))
       errorcall(call,"can't yet read write .dta on this platform");
 
 
@@ -553,7 +558,7 @@ SEXP do_writeStata(SEXP call)
 	errorcall(call, "unable to open file");
  
     df=CADDR(call);
-    if (!InheritsClass(df,"data.frame"))
+    if (!inherits(df,"data.frame"))
         errorcall(call,"data to be saved must be in a data frame.");
  
     R_SaveStataData(fp,df);
