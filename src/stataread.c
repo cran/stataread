@@ -267,10 +267,12 @@ SEXP R_LoadStataData(FILE *fp)
    
     /** and now stick the labels on it **/
     
-    PROTECT(tmp=mkChar(datalabel));
+    PROTECT(tmp=allocVector(STRSXP,1));
+    STRING(tmp)[0]=mkChar(datalabel);
     setAttrib(df,install("datalabel"),tmp);
     UNPROTECT(1);
-    PROTECT(tmp=mkChar(timestamp));
+    PROTECT(tmp=allocVector(STRSXP,1));
+    STRING(tmp)[0]=mkChar(timestamp);
     setAttrib(df,install("time.stamp"),tmp);
     UNPROTECT(1);
 
