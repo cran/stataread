@@ -1,0 +1,562 @@
+/**
+  Read and write Stata .dta files.
+  
+  (c) 1999 Thomas Lumley. 
+
+  The format of Stata files is documented under 'file formats' 
+  in the Stata manual.
+
+  This code currently does not write string variables, does
+  not make use of the print format or value label information
+  in a .dta file, and does not handle reading from a file written
+  on a machine with different byte-ordering.
+
+**/
+
+#include "Rinternals.h"
+#include <stdio.h>
+
+#define LOHI 1
+#define HILO 2
+#define NATIVE_ENDIAN 0
+
+#define STATA_FLOAT  'f'
+#define STATA_DOUBLE 'd'
+#define STATA_INT    'l'
+#define STATA_SHORTINT 'i'
+#define STATA_BYTE  'b'
+
+#define STATA_STRINGOFFSET 0x7f
+
+#define STATA_BYTE_NA 127
+#define STATA_SHORTINT_NA 32767
+#define STATA_INT_NA 2147483647
+
+static double STATA_FLOAT_NA;
+static double STATA_DOUBLE_NA;
+static int endian;
+
+typedef union
+{
+  double value;
+  unsigned int word[2];
+} ieee_double;
+
+
+static int setup_consts()
+{
+    ieee_double x;
+    x.value = 1;
+    if (x.word[0] == 0x3ff00000) {
+	endian=LOHI;
+    }
+    else if (x.word[1] == 0x3ff00000) {
+	endian=HILO;
+    }
+    else error("couldn't determine endianness.");
+
+    STATA_FLOAT_NA=pow(2,127);
+    STATA_DOUBLE_NA=pow(2,1023);
+      
+}
+
+
+/*****
+      Turn a .dta file into a data frame
+      Variable labels go to attributes of the data frame
+
+      value labels and characteristics could go as attributes of the variables 
+      not yet
+****/
+
+
+static int InIntegerBinary(FILE * fp, int naok)
+{
+    int i;
+    if (fread(&i, sizeof(int), 1, fp) != 1)
+	error("a binary read error occured");
+    return (i==STATA_INT_NA & !naok ? NA_INTEGER : i);
+}
+
+static int InByteBinary(FILE * fp, int naok)
+{ 
+    unsigned char i;
+    if (fread(&i, sizeof(char), 1, fp) != 1)
+	error("a binary read error occured");
+    return  (i==STATA_BYTE_NA & !naok ? NA_INTEGER : (int) i);
+}
+
+static int InShortIntBinary(FILE * fp, int naok)
+{
+  int first,second,result;
+  
+  first = InByteBinary(fp,1);
+  second = InByteBinary(fp,1);
+  if (endian==LOHI){
+    first=(char) first;
+    result= first*256+second;
+  } else {
+    second=(char) second;
+    result=second*256+first;
+  }
+  return (result==STATA_SHORTINT_NA & !naok ? NA_INTEGER  : result);
+}
+
+
+static double InDoubleBinary(FILE * fp, int naok)
+{
+    double i;
+    if (fread(&i, sizeof(double), 1, fp) != 1)
+	error("a binary read error occured");
+    return (i==STATA_DOUBLE_NA & !naok ? NA_REAL : i);
+}
+
+static double InFloatBinary(FILE * fp, int naok)
+{
+    float i;
+    if (fread(&i, sizeof(float), 1, fp) != 1)
+	error("a binary read error occured");
+    return (i==STATA_FLOAT_NA & !naok ? NA_REAL : (double) i);
+}
+
+static void InStringBinary(FILE * fp, int nchar, char* buffer)
+{
+    if (fread(buffer, nchar, 1, fp) != 1)
+	error("a binary read error occured");
+}
+
+static char* nameMangle(char *stataname, int len){
+    char c;
+    int i;
+    for(i=0;i<len;i++)
+      if (stataname[i]=='_') stataname[i]='.';
+    return stataname;
+}
+
+
+
+SEXP R_LoadStataData(FILE *fp)
+{
+    int i,j,anint,nvar,nobs,charlen,stata_endian;
+    unsigned char abyte;
+    char datalabel[81], timestamp[18], aname[9];
+    double anumeric;
+    SEXP df,names,tmp,varlabels,vallabels,types,row_names;
+    
+    setup_consts();  /*endianness*/
+
+    /** first read the header **/
+    
+    if(InByteBinary(fp,1)!='l')            /* release */
+      error("Not a Stata v6.0 file");
+    stata_endian=(int) InByteBinary(fp,1);     /* byte ordering */
+    if (endian!=stata_endian)
+        error("Can't convert between byte orderings yet");
+    InByteBinary(fp,1);            /* filetype -- junk */
+    InByteBinary(fp,1);            /* padding */
+    nvar = InShortIntBinary(fp,1); /* number of variables */
+    nobs = InIntegerBinary(fp,1);  /* number of cases */
+    InStringBinary(fp,81,datalabel);   /* data label - zero terminated string */
+    InStringBinary(fp,18,timestamp);   /* file creation time - zero terminated string */
+  
+    /** make the data frame **/
+
+    PROTECT(df=allocVector(VECSXP, nvar));
+   
+    /** and now stick the labels on it **/
+    
+    PROTECT(tmp=mkChar(datalabel));
+    setAttrib(df,install("datalabel"),tmp);
+    UNPROTECT(1);
+    PROTECT(tmp=mkChar(timestamp));
+    setAttrib(df,install("time.stamp"),tmp);
+    UNPROTECT(1);
+
+      
+    /** read variable descriptors **/
+    
+    /** types **/
+    
+    PROTECT(types=allocVector(INTSXP,nvar));
+    for(i=0;i<nvar;i++){
+        abyte = InByteBinary(fp,1);
+	INTEGER(types)[i]= abyte;
+        switch (abyte) {
+	case STATA_FLOAT:
+	case STATA_DOUBLE:
+	  VECTOR(df)[i]=allocVector(REALSXP,nobs);
+	  break;
+	case STATA_INT:
+	case STATA_SHORTINT:
+	case STATA_BYTE:
+	    VECTOR(df)[i]=allocVector(INTSXP,nobs);
+	    break;
+	default:
+	    if (abyte<STATA_STRINGOFFSET)
+	      error("Unknown data type");
+	    VECTOR(df)[i]=allocVector(STRSXP,nobs);
+	    break;
+	}
+    }
+
+    /** names **/
+
+    PROTECT(names=allocVector(STRSXP,nvar));
+    for (i=0;i<nvar;i++){
+        InStringBinary(fp,9,aname);
+        STRING(names)[i]=mkChar(nameMangle(aname,9));
+    }
+    setAttrib(df,R_NamesSymbol, names);
+    
+    UNPROTECT(1);
+
+    /** sortlist -- not relevant **/
+
+    for (i=0;i<2*(nvar+1);i++)
+        InByteBinary(fp,1);
+    
+    /** format list
+	passed back to R as attributes.
+	Useful to identify date variables.
+    **/
+
+    PROTECT(tmp=allocVector(STRSXP,nvar));
+    for (i=0;i<nvar;i++){
+        InStringBinary(fp,12,timestamp);
+	STRING(tmp)[i]=mkChar(timestamp);
+    }
+    setAttrib(df,install("formats"),tmp);
+    UNPROTECT(1);
+
+    /** value labels.  These are stored as the names of label formats, 
+	which are themselves stored later in the file.  Not implemented**/
+ 
+    for(i=0;i<nvar;i++){
+        InStringBinary(fp,9,aname);
+    }
+	
+
+    /** Variable Labels **/
+    
+    PROTECT(varlabels=allocVector(STRSXP,nvar));
+
+    for(i=0;i<nvar;i++) {
+        InStringBinary(fp,81,datalabel);
+        STRING(varlabels)[i]=mkChar(datalabel);
+    }
+
+    setAttrib(df, install("var.labels"), varlabels);
+    
+    UNPROTECT(1);
+
+    /** variable 'characteristics'  -- not yet implemented **/
+
+    while(InByteBinary(fp,1)) {
+        charlen=InShortIntBinary(fp,1);
+	for (i=0;i<charlen;i++)
+	  InByteBinary(fp,1);
+    }
+    charlen=InShortIntBinary(fp,1);
+    if (charlen!=0)
+      error("Type 0 characteristic of nonzero length");
+
+
+    /** The Data **/
+
+
+    for(i=0;i<nobs;i++){
+        for(j=0;j<nvar;j++){
+	    switch (INTEGER(types)[j]) {
+	    case STATA_FLOAT:
+	        REAL(VECTOR(df)[j])[i]=InFloatBinary(fp,0);
+		break;
+	    case STATA_DOUBLE:
+	        REAL(VECTOR(df)[j])[i]=InDoubleBinary(fp,0);
+		break;
+	    case STATA_INT:
+	        INTEGER(VECTOR(df)[j])[i]=InIntegerBinary(fp,0);
+		break;
+	    case STATA_SHORTINT:
+	        INTEGER(VECTOR(df)[j])[i]=InShortIntBinary(fp,0);
+		break;
+	    case STATA_BYTE:
+	        INTEGER(VECTOR(df)[j])[i]=(int) InByteBinary(fp,0);
+		break;
+	    default:
+	        charlen=INTEGER(types)[j]-0x7F;
+	        PROTECT(tmp=allocString(charlen+1));
+		InStringBinary(fp,charlen,CHAR(tmp));
+		CHAR(tmp)[charlen]=0;
+		STRING(VECTOR(df)[j])[i]=tmp;
+		UNPROTECT(1);
+	      break;
+	    }
+	}
+    }  
+    PROTECT(tmp = mkString("data.frame"));
+    setAttrib(df, R_ClassSymbol, tmp);
+    UNPROTECT(1);
+    PROTECT(row_names = allocVector(STRSXP, nobs));
+    for (i=0; i<nobs; i++) {
+        sprintf(datalabel, "%d", i+1);
+        STRING(row_names)[i] = mkChar(datalabel);
+    }
+    setAttrib(df, R_RowNamesSymbol, row_names);
+    UNPROTECT(1);     
+
+    UNPROTECT(2);
+
+    return(df);
+
+}
+SEXP do_readStata(SEXP call)
+{ 
+    SEXP fname,  result;
+    FILE *fp;
+
+    if (sizeof(double)!=8 | sizeof(int)!=4 | sizeof(float)!=4)
+      errorcall(call,"can't yet read Stata .dta on this platform");
+
+
+    if (!isValidString(fname = CADR(call)))
+	errorcall (call, "first argument must be a file name\n");
+
+    fp = fopen(R_ExpandFileName(CHAR(STRING(fname)[0])), "rb");
+    if (!fp)
+	errorcall(call, "unable to open file");
+    result = R_LoadStataData(fp);
+    fclose(fp);
+    return result;
+}
+
+
+/** low level output **/
+
+static void OutIntegerBinary(int i, FILE * fp, int naok)
+{
+    i=(i==NA_INTEGER & !naok ? STATA_INT_NA : i);
+    if (fwrite(&i, sizeof(int), 1, fp) != 1)
+	error("a binary write error occured");
+
+}
+
+static void OutByteBinary(unsigned char i, FILE * fp)
+{ 
+    if (fwrite(&i, sizeof(char), 1, fp) != 1)
+	error("a binary write error occured");
+}
+
+static void OutShortIntBinary(int i,FILE * fp)
+{
+  unsigned char first,second;
+  
+  if (endian==LOHI){
+    first=i/256;
+    second=i%256;
+  } 
+  else {
+    first=i%256;
+    second=i/256;
+  }
+  if (fwrite(&first, sizeof(char), 1, fp) != 1)
+    error("a binary write error occured");
+  if (fwrite(&second, sizeof(char), 1, fp) != 1)
+    error("a binary write error occured");
+}
+
+
+static double OutDoubleBinary(double d, FILE * fp, int naok)
+{
+    d=(R_FINITE(d) ? d : STATA_DOUBLE_NA);
+    if (fwrite(&d, sizeof(double), 1, fp) != 1)
+	error("a binary write error occured");
+}
+
+
+static void OutStringBinary(char *buffer, FILE * fp, int nchar)
+{
+    if (fwrite(buffer, nchar, 1, fp) != 1)
+	error("a binary write error occured");
+}
+
+static char* nameMangleOut(char *stataname, int len){
+    char c;
+    int i;
+    for(i=0;i<len;i++){
+      if (stataname[i]=='.') stataname[i]='_';
+    }
+    return stataname;
+}
+
+void R_SaveStataData(FILE *fp, SEXP df)
+{
+    int i,j,anint,nvar,nobs,charlen,stata_endian,l,k;
+    unsigned char abyte;
+    char datalabel[81]="Written by R.              ", timestamp[18], aname[9];
+    double anumeric;
+
+    char format9g[12]="%9.0g";
+    
+    SEXP names,tmp,varlabels,vallabels,types,row_names;
+    
+    setup_consts();  /*endianness*/
+
+    /** first write the header **/
+    
+    OutByteBinary((char) 108,fp);            /* release */
+    OutByteBinary((char) endian,fp);
+    OutByteBinary(1,fp);            /* filetype */
+    OutByteBinary(0,fp);            /* padding */
+
+    nvar=length(df);
+    OutShortIntBinary(nvar,fp);
+    nobs=length(VECTOR(df)[0]);
+    OutIntegerBinary(nobs,fp,1);  /* number of cases */
+    OutStringBinary(datalabel,fp,81);   /* data label - zero terminated string */
+    for(i=0;i<18;i++){
+      timestamp[i]=0;
+    }
+    OutStringBinary(timestamp,fp,18);   /* file creation time - zero terminated string */
+  
+   
+    
+    /** write variable descriptors **/
+    
+    /** types **/
+    /* FIXME: writes everything as double or integer to save effort*/
+    
+    PROTECT(types=allocVector(INTSXP,nvar));
+
+    for(i=0;i<nvar;i++){
+      switch(TYPEOF(VECTOR(df)[i])){
+        case LGLSXP:
+        case INTSXP:
+	  OutByteBinary(STATA_INT,fp);
+	  break;
+	case REALSXP:
+	  OutByteBinary(STATA_DOUBLE,fp);
+	  break;
+        case STRSXP:
+	  charlen=0;
+	  for(j=0;j<nobs;j++){
+	    k=length(STRING(VECTOR(df)[i])[j]);
+	    if (k>charlen)
+	      charlen=k;
+	  }
+	  OutByteBinary((unsigned char)(k+0x7f),fp);
+	  INTEGER(types)[i]=k;
+	  break;
+	default:
+	  error("Unknown data type");
+	  break;
+      }
+    }
+
+    /** names truncated to 8 characters**/
+    
+    PROTECT(names=getAttrib(df,R_NamesSymbol));
+    for (i=0;i<nvar;i++){
+ 	strncpy(aname,CHAR(STRING(names)[i]),8);
+        OutStringBinary(nameMangleOut(aname,8),fp,8);
+	OutByteBinary(0,fp);
+    }
+
+
+
+    /** sortlist -- not relevant **/
+
+    for (i=0;i<2*(nvar+1);i++)
+        OutByteBinary(0,fp);
+    
+    /** format list: pick a format, any format   **/
+
+    for (i=0;i<nvar;i++){
+      OutStringBinary(format9g,fp,12);
+    }
+
+    /** value labels.  These are stored as the names of label formats, 
+	which are themselves stored later in the file.  Not implemented**/
+ 
+    for(i=0;i<9;i++)
+      aname[i]=(char) 0;
+    for(i=0;i<nvar;i++){
+        OutStringBinary(aname,fp,9);
+    }
+	
+
+    /** Variable Labels -- full R name of column**/
+     
+
+    for(i=0;i<nvar;i++) {
+        snprintf(datalabel,81,"%s",CHAR(STRING(names)[i]));
+	datalabel[80]=(char) 0;
+        OutStringBinary(datalabel,fp,81);
+    }
+    UNPROTECT(1); /*names*/
+
+
+    
+
+    /** variable 'characteristics' -- not relevant**/
+    OutByteBinary(0,fp);
+    OutByteBinary(0,fp);
+    OutByteBinary(0,fp);
+
+
+    /** The Data **/
+
+
+    for(i=0;i<nobs;i++){
+        for(j=0;j<nvar;j++){
+	    switch (TYPEOF(VECTOR(df)[j])) {
+	    case LGLSXP:
+	        OutIntegerBinary(LOGICAL(VECTOR(df)[j])[i],fp,0);
+		break;
+	    case INTSXP:
+	        OutIntegerBinary(INTEGER(VECTOR(df)[j])[i],fp,0);
+		break;
+	    case REALSXP:
+	        OutDoubleBinary(REAL(VECTOR(df)[j])[i],fp,0);
+		break;
+	    case STRSXP:
+	        k=length(STRING(VECTOR(df)[j])[i]);
+	        OutStringBinary(CHAR(STRING(VECTOR(df)[j])[i]),fp,k);
+		for(l=INTEGER(types)[j]-k;l>0;l--)
+		    OutByteBinary(0,fp);
+	        break;
+	    default:
+	        error("This can't happen.");
+	        break;
+	    }
+	}
+    }  
+    UNPROTECT(1); /*types*/
+
+
+}
+
+SEXP do_writeStata(SEXP call)
+{ 
+    SEXP fname,  df;
+    FILE *fp;
+
+    if (sizeof(double)!=8 | sizeof(int)!=4 | sizeof(float)!=4)
+      errorcall(call,"can't yet read write .dta on this platform");
+
+
+    if (!isValidString(fname = CADR(call)))
+	errorcall (call, "first argument must be a file name\n");
+
+
+    fp = fopen(R_ExpandFileName(CHAR(STRING(fname)[0])), "wb");
+    if (!fp)
+	errorcall(call, "unable to open file");
+ 
+    df=CADDR(call);
+    if (!InheritsClass(df,"data.frame"))
+        errorcall(call,"data to be saved must be in a data frame.");
+ 
+    R_SaveStataData(fp,df);
+    fclose(fp);
+    return R_NilValue;
+}
