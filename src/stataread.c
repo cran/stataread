@@ -1,5 +1,5 @@
 /**
-  Read and write Stata version 6.0 .dta files.
+  Read  Stata version 6.0 and 5.0 .dta files, write version 6.0.
   
   (c) 1999 Thomas Lumley. 
 
@@ -12,7 +12,7 @@
   'float' or 'double' that differ from IEEE 4-byte integer, 4-byte
   real and 8-byte real respectively. 
 
-  Versions of Stata before 6.0 used different file formats.
+  Versions of Stata before 4.0 used different file formats.
 
 **/
 
@@ -39,6 +39,77 @@ static double STATA_FLOAT_NA;
 static double STATA_DOUBLE_NA;
 static int endian;
 
+
+/** these are not portable, but we can only handle Stata files
+    on machines with IEEE numbers anyway
+**/
+typedef union {
+  double value;
+  unsigned char bytes[8];
+} stata8;
+
+typedef union {
+  int ivalue;
+  float fvalue;
+  unsigned char bytes[4];
+} stata4;
+
+static double swapd(double d){
+    stata8 rval,input;
+    input.value=d;
+    rval.bytes[7]=input.bytes[0];
+    rval.bytes[0]=input.bytes[7];
+    rval.bytes[6]=input.bytes[1];
+    rval.bytes[1]=input.bytes[6];
+    rval.bytes[5]=input.bytes[2];
+    rval.bytes[2]=input.bytes[5];
+    rval.bytes[4]=input.bytes[3];
+    rval.bytes[3]=input.bytes[4];
+    return rval.value;
+}
+
+static double noswapd(double input){
+  return input;
+}
+
+static int swapi(int i){
+    stata4 rval,input;
+    input.ivalue=i;
+    rval.bytes[0]=input.bytes[3];
+    rval.bytes[3]=input.bytes[0];
+    rval.bytes[1]=input.bytes[2];
+    rval.bytes[2]=input.bytes[1];
+    return rval.ivalue;
+}
+
+static int noswapi(int i){
+  return i; 
+}
+
+static double swapf(float f){
+    stata4 rval,input;
+    input.fvalue=f;
+    rval.bytes[0]=input.bytes[3];
+    rval.bytes[3]=input.bytes[0];
+    rval.bytes[1]=input.bytes[2];
+    rval.bytes[2]=input.bytes[1];
+    return (double) rval.fvalue;
+}
+
+static double noswapf(float input){
+  return (double) input;
+}
+static int swaps(int s){
+    int rval;
+    rval=(s % 256)*256 + (s/256);
+    return rval;
+}
+
+static int noswaps(int input){
+  return input;
+}
+
+
 typedef union
 {
   double value;
@@ -64,14 +135,7 @@ static void setup_consts()
 }
 
 
-/*****
-      Turn a .dta file into a data frame
-      Variable labels go to attributes of the data frame
-
-      value labels and characteristics could go as attributes of the variables 
-      not yet implemented
-****/
-
+/** Low-level input **/
 
 static int InIntegerBinary(FILE * fp, int naok)
 {
@@ -114,12 +178,12 @@ static double InDoubleBinary(FILE * fp, int naok)
     return ((i==STATA_DOUBLE_NA) & !naok ? NA_REAL : i);
 }
 
-static double InFloatBinary(FILE * fp, int naok)
+static float InFloatBinary(FILE * fp, int naok)
 {
     float i;
     if (fread(&i, sizeof(float), 1, fp) != 1)
 	error("a binary read error occured");
-    return ((i==STATA_FLOAT_NA) & !naok ? NA_REAL : (double) i);
+    return ((i==STATA_FLOAT_NA) & !naok ? (float) NA_REAL :  i);
 }
 
 static void InStringBinary(FILE * fp, int nchar, char* buffer)
@@ -136,29 +200,66 @@ static char* nameMangle(char *stataname, int len){
 }
 
 
+/*****
+      Turn a .dta file into a data frame
+      Variable labels go to attributes of the data frame
+
+      value labels and characteristics could go as attributes of the variables 
+      not yet implemented
+****/
+
+
 
 SEXP R_LoadStataData(FILE *fp)
 {
-    int i,j,nvar,nobs,charlen,stata_endian;
+    int i,j,nvar,nobs,charlen,stata_endian, version5;
     unsigned char abyte;
     char datalabel[81], timestamp[18], aname[9];
     SEXP df,names,tmp,varlabels,types,row_names;
+    double (*orderd)(double);
+    double (*orderf)(float);
+    int (*orderi)(int), (*orders)(int);
+    
     
     setup_consts();  /*endianness*/
 
     /** first read the header **/
     
-    if(InByteBinary(fp,1)!='l')            /* release */
-      error("Not a Stata v6.0 file");
+    abyte=InByteBinary(fp,1);   /* release version */
+    version5=0;  /*-Wall*/
+    switch (abyte){
+    case 0x69:
+        version5=1;
+	break;
+    case 'l':
+        version5=0;
+	break;
+    default:
+        error("Not a Stata v5 or v6 file");
+    }
     stata_endian=(int) InByteBinary(fp,1);     /* byte ordering */
-    if (endian!=stata_endian)
-        error("Can't convert between byte orderings yet");
+    if (endian!=stata_endian){
+        orderd=swapd;  /* double */
+        orderf=swapf;  /* float */
+	orderi=swapi;  /* integer */
+	orders=swaps;  /* short integer */
+    } else {
+        orderd=noswapd;
+	orderf=noswapf;
+	orderi=noswapi;
+	orders=noswaps;
+    }
     InByteBinary(fp,1);            /* filetype -- junk */
     InByteBinary(fp,1);            /* padding */
-    nvar = InShortIntBinary(fp,1); /* number of variables */
-    nobs = InIntegerBinary(fp,1);  /* number of cases */
-    InStringBinary(fp,81,datalabel);   /* data label - zero terminated string */
-    InStringBinary(fp,18,timestamp);   /* file creation time - zero terminated string */
+    nvar = (*orders) (InShortIntBinary(fp,1)); /* number of variables */
+    nobs = (*orderi)(InIntegerBinary(fp,1));  /* number of cases */
+    /* data label - zero terminated string */
+    if (version5)         
+        InStringBinary(fp,32,datalabel);
+    else
+        InStringBinary(fp,81,datalabel);   
+    /* file creation time - zero terminated string */
+    InStringBinary(fp,18,timestamp);  
   
     /** make the data frame **/
 
@@ -241,11 +342,17 @@ SEXP R_LoadStataData(FILE *fp)
     
     PROTECT(varlabels=allocVector(STRSXP,nvar));
 
-    for(i=0;i<nvar;i++) {
-        InStringBinary(fp,81,datalabel);
-        STRING(varlabels)[i]=mkChar(datalabel);
+    if (version5){
+        for(i=0;i<nvar;i++) {
+            InStringBinary(fp,32,datalabel);
+	    STRING(varlabels)[i]=mkChar(datalabel);
+	}
+    } else {
+        for(i=0;i<nvar;i++) {
+            InStringBinary(fp,81,datalabel);
+	    STRING(varlabels)[i]=mkChar(datalabel);
+	}
     }
-
     setAttrib(df, install("var.labels"), varlabels);
     
     UNPROTECT(1);
@@ -253,11 +360,11 @@ SEXP R_LoadStataData(FILE *fp)
     /** variable 'characteristics'  -- not yet implemented **/
 
     while(InByteBinary(fp,1)) {
-        charlen=InShortIntBinary(fp,1);
+        charlen=(*orders) (InShortIntBinary(fp,1));
 	for (i=0;i<charlen;i++)
 	  InByteBinary(fp,1);
     }
-    charlen=InShortIntBinary(fp,1);
+    charlen=(*orders)(InShortIntBinary(fp,1));
     if (charlen!=0)
       error("Type 0 characteristic of nonzero length");
 
@@ -269,16 +376,16 @@ SEXP R_LoadStataData(FILE *fp)
         for(j=0;j<nvar;j++){
 	    switch (INTEGER(types)[j]) {
 	    case STATA_FLOAT:
-	        REAL(VECTOR(df)[j])[i]=InFloatBinary(fp,0);
+	        REAL(VECTOR(df)[j])[i]=(*orderf)(InFloatBinary(fp,0));
 		break;
 	    case STATA_DOUBLE:
-	        REAL(VECTOR(df)[j])[i]=InDoubleBinary(fp,0);
+	        REAL(VECTOR(df)[j])[i]=(*orderd)(InDoubleBinary(fp,0));
 		break;
 	    case STATA_INT:
-	        INTEGER(VECTOR(df)[j])[i]=InIntegerBinary(fp,0);
+	        INTEGER(VECTOR(df)[j])[i]=(*orderi)(InIntegerBinary(fp,0));
 		break;
 	    case STATA_SHORTINT:
-	        INTEGER(VECTOR(df)[j])[i]=InShortIntBinary(fp,0);
+	        INTEGER(VECTOR(df)[j])[i]=(*orders)(InShortIntBinary(fp,0));
 		break;
 	    case STATA_BYTE:
 	        INTEGER(VECTOR(df)[j])[i]=(int) InByteBinary(fp,0);
