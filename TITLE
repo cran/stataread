@@ -1,3 +1,1 @@
-stataread	Read and write files in Stata 6.0 binary format.
-
-
+stataread       Read and write Stata .dta files

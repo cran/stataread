@@ -426,15 +426,15 @@ SEXP do_readStata(SEXP call)
     FILE *fp;
 
     if ((sizeof(double)!=8) | (sizeof(int)!=4) | (sizeof(float)!=4))
-      errorcall(call,"can't yet read Stata .dta on this platform");
+      error("can't yet read Stata .dta on this platform");
 
 
     if (!isValidString(fname = CADR(call)))
-	errorcall (call, "first argument must be a file name\n");
+	error("first argument must be a file name\n");
 
     fp = fopen(R_ExpandFileName(CHAR(STRING_ELT(fname,0))), "rb");
     if (!fp)
-	errorcall(call, "unable to open file");
+	error("unable to open file");
     result = R_LoadStataData(fp);
     fclose(fp);
     return result;
@@ -657,20 +657,20 @@ SEXP do_writeStata(SEXP call)
     FILE *fp;
 
     if ((sizeof(double)!=8) | (sizeof(int)!=4) | (sizeof(float)!=4))
-      errorcall(call,"can't yet read write .dta on this platform");
+      error("can't yet read write .dta on this platform");
 
 
     if (!isValidString(fname = CADR(call)))
-	errorcall (call, "first argument must be a file name\n");
+	error("first argument must be a file name\n");
 
 
     fp = fopen(R_ExpandFileName(CHAR(STRING_ELT(fname,0))), "wb");
     if (!fp)
-	errorcall(call, "unable to open file");
+	error("unable to open file");
  
     df=CADDR(call);
     if (!inherits(df,"data.frame"))
-        errorcall(call,"data to be saved must be in a data frame.");
+        error("data to be saved must be in a data frame.");
  
     R_SaveStataData(fp,df);
     fclose(fp);
