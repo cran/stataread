@@ -1,1 +1,7 @@
-Version 2.1: read time stamp and datalabel into STRSXP, not CHARSXP
+Version 2.4: Wrong-endian reading fixed so that it actually works
+
+Version 2.3: Wrong-endian reading of more than 128 variables fixed.
+
+Version 2.2: removed some junk packaged by accident.
+
+Version 2.1: read time stamp and datalabel into STRSXP, not CHARSXP (Michael Hills).

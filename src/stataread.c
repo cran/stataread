@@ -37,7 +37,7 @@
 
 static double STATA_FLOAT_NA;
 static double STATA_DOUBLE_NA;
-static int endian;
+static int endian,stata_endian;
 
 
 /** these are not portable, but we can only handle Stata files
@@ -68,9 +68,6 @@ static double swapd(double d){
     return rval.value;
 }
 
-static double noswapd(double input){
-  return input;
-}
 
 static int swapi(int i){
     stata4 rval,input;
@@ -82,9 +79,6 @@ static int swapi(int i){
     return rval.ivalue;
 }
 
-static int noswapi(int i){
-  return i; 
-}
 
 static double swapf(float f){
     stata4 rval,input;
@@ -96,18 +90,7 @@ static double swapf(float f){
     return (double) rval.fvalue;
 }
 
-static double noswapf(float input){
-  return (double) input;
-}
-static int swaps(int s){
-    int rval;
-    rval=(s % 256)*256 + (s/256);
-    return rval;
-}
 
-static int noswaps(int input){
-  return input;
-}
 
 
 typedef union
@@ -137,11 +120,13 @@ static void setup_consts()
 
 /** Low-level input **/
 
-static int InIntegerBinary(FILE * fp, int naok)
+static int InIntegerBinary(FILE * fp, int naok, int swapends)
 {
     int i;
     if (fread(&i, sizeof(int), 1, fp) != 1)
 	error("a binary read error occured");
+    if (swapends)
+	i=swapi(i);
     return ((i==STATA_INT_NA) & !naok ? NA_INTEGER : i);
 }
 
@@ -153,36 +138,38 @@ static int InByteBinary(FILE * fp, int naok)
     return  ((i==STATA_BYTE_NA) & !naok ? NA_INTEGER : (int) i);
 }
 
-static int InShortIntBinary(FILE * fp, int naok)
+static int InShortIntBinary(FILE * fp, int naok,int swapends)
 {
-  int first,second,result;
+  unsigned short first,second,result;
   
   first = InByteBinary(fp,1);
   second = InByteBinary(fp,1);
-  if (endian==LOHI){
-    first=(char) first;
-    result= first*256+second;
+  if (stata_endian==LOHI){
+    result= (first<<8) | second;
   } else {
-    second=(char) second;
-    result=second*256+first;
+    result= (second<<8) | first;
   }
   return ((result==STATA_SHORTINT_NA) & !naok ? NA_INTEGER  : result);
 }
 
 
-static double InDoubleBinary(FILE * fp, int naok)
+static double InDoubleBinary(FILE * fp, int naok, int swapends)
 {
     double i;
     if (fread(&i, sizeof(double), 1, fp) != 1)
 	error("a binary read error occured");
+    if (swapends)
+	i=swapd(i);
     return ((i==STATA_DOUBLE_NA) & !naok ? NA_REAL : i);
 }
 
-static float InFloatBinary(FILE * fp, int naok)
+static float InFloatBinary(FILE * fp, int naok, int swapends)
 {
     float i;
     if (fread(&i, sizeof(float), 1, fp) != 1)
 	error("a binary read error occured");
+    if (swapends)
+	i= swapf(i);
     return ((i==STATA_FLOAT_NA) & !naok ? (float) NA_REAL :  i);
 }
 
@@ -212,14 +199,11 @@ static char* nameMangle(char *stataname, int len){
 
 SEXP R_LoadStataData(FILE *fp)
 {
-    int i,j,nvar,nobs,charlen,stata_endian, version5;
+    int i,j,nvar,nobs,charlen, version5,swapends;
     unsigned char abyte;
     char datalabel[81], timestamp[18], aname[9];
     SEXP df,names,tmp,varlabels,types,row_names;
-    double (*orderd)(double);
-    double (*orderf)(float);
-    int (*orderi)(int), (*orders)(int);
-    
+   
     
     setup_consts();  /*endianness*/
 
@@ -238,21 +222,15 @@ SEXP R_LoadStataData(FILE *fp)
         error("Not a Stata v5 or v6 file");
     }
     stata_endian=(int) InByteBinary(fp,1);     /* byte ordering */
-    if (endian!=stata_endian){
-        orderd=swapd;  /* double */
-        orderf=swapf;  /* float */
-	orderi=swapi;  /* integer */
-	orders=swaps;  /* short integer */
-    } else {
-        orderd=noswapd;
-	orderf=noswapf;
-	orderi=noswapi;
-	orders=noswaps;
-    }
+    if (endian!=stata_endian)
+	swapends=1;
+    else 
+	swapends=0;
+
     InByteBinary(fp,1);            /* filetype -- junk */
     InByteBinary(fp,1);            /* padding */
-    nvar = (*orders) (InShortIntBinary(fp,1)); /* number of variables */
-    nobs = (*orderi)(InIntegerBinary(fp,1));  /* number of cases */
+    nvar =  (InShortIntBinary(fp,1,swapends)); /* number of variables */
+    nobs =(InIntegerBinary(fp,1,swapends));  /* number of cases */
     /* data label - zero terminated string */
     if (version5)         
         InStringBinary(fp,32,datalabel);
@@ -362,13 +340,13 @@ SEXP R_LoadStataData(FILE *fp)
     /** variable 'characteristics'  -- not yet implemented **/
 
     while(InByteBinary(fp,1)) {
-        charlen=(*orders) (InShortIntBinary(fp,1));
+        charlen= (InShortIntBinary(fp,1,swapends));
 	for (i=0;i<charlen;i++)
 	  InByteBinary(fp,1);
     }
-    charlen=(*orders)(InShortIntBinary(fp,1));
+    charlen=(InShortIntBinary(fp,1,swapends));
     if (charlen!=0)
-      error("Type 0 characteristic of nonzero length");
+      error("Something strange in the file\n (Type 0 characteristic of nonzero length)");
 
 
     /** The Data **/
@@ -378,16 +356,16 @@ SEXP R_LoadStataData(FILE *fp)
         for(j=0;j<nvar;j++){
 	    switch (INTEGER(types)[j]) {
 	    case STATA_FLOAT:
-	        REAL(VECTOR(df)[j])[i]=(*orderf)(InFloatBinary(fp,0));
+	        REAL(VECTOR(df)[j])[i]=(InFloatBinary(fp,0,swapends));
 		break;
 	    case STATA_DOUBLE:
-	        REAL(VECTOR(df)[j])[i]=(*orderd)(InDoubleBinary(fp,0));
+	        REAL(VECTOR(df)[j])[i]=(InDoubleBinary(fp,0,swapends));
 		break;
 	    case STATA_INT:
-	        INTEGER(VECTOR(df)[j])[i]=(*orderi)(InIntegerBinary(fp,0));
+	        INTEGER(VECTOR(df)[j])[i]=(InIntegerBinary(fp,0,swapends));
 		break;
 	    case STATA_SHORTINT:
-	        INTEGER(VECTOR(df)[j])[i]=(*orders)(InShortIntBinary(fp,0));
+	        INTEGER(VECTOR(df)[j])[i]=(InShortIntBinary(fp,0,swapends));
 		break;
 	    case STATA_BYTE:
 	        INTEGER(VECTOR(df)[j])[i]=(int) InByteBinary(fp,0);
@@ -461,12 +439,12 @@ static void OutShortIntBinary(int i,FILE * fp)
   unsigned char first,second;
   
   if (endian==LOHI){
-    first=i/256;
-    second=i%256;
+    first= (i>>8);
+    second=i & 0xff;
   } 
   else {
-    first=i%256;
-    second=i/256;
+    first=i & 0xff;
+    second=i>>8;
   }
   if (fwrite(&first, sizeof(char), 1, fp) != 1)
     error("a binary write error occured");
