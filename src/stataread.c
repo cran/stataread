@@ -1,28 +1,40 @@
 /**
   Read  Stata version 6.0 and 5.0 .dta files, write version 6.0.
   
-  (c) 1999 Thomas Lumley. 
+  (c) 1999, 2000 Thomas Lumley. 
 
   The format of Stata files is documented under 'file formats' 
   in the Stata manual.
 
   This code currently does not make use of the print format or value
-  label information in a .dta file, and does not handle reading from a
-  file written on a machine with different byte-ordering or with 'int'
+  label information in a .dta file. It cannot handle files with 'int'
   'float' or 'double' that differ from IEEE 4-byte integer, 4-byte
-  real and 8-byte real respectively. 
+  real and 8-byte real respectively: it's not clear whether such files
+  can exist.
 
   Versions of Stata before 4.0 used different file formats.
 
 **/
 
+
+#include "R.h"
 #include "Rinternals.h"
 #include <stdio.h>
 
+/** R 1.2 compatibility definitions **/
+#if R_VERSION < R_Version(1, 2, 0)
+# define STRING_ELT(x,i)    (STRING(x)[i])
+# define VECTOR_ELT(x,i)    (VECTOR(x)[i])
+# define SET_STRING_ELT(x,i,v)  (STRING(x)[i]=(v))
+# define SET_VECTOR_ELT(x,i,v)  (VECTOR(x)[i]=(v))
+#endif
+
+/* handling endianess*/
 #define LOHI 1
 #define HILO 2
 #define NATIVE_ENDIAN 0
 
+/* Stata format constants */
 #define STATA_FLOAT  'f'
 #define STATA_DOUBLE 'd'
 #define STATA_INT    'l'
@@ -246,11 +258,13 @@ SEXP R_LoadStataData(FILE *fp)
     /** and now stick the labels on it **/
     
     PROTECT(tmp=allocVector(STRSXP,1));
-    STRING(tmp)[0]=mkChar(datalabel);
+    /* STRING(tmp)[0]=mkChar(datalabel);*/
+    SET_STRING_ELT(tmp,0,mkChar(datalabel));
     setAttrib(df,install("datalabel"),tmp);
     UNPROTECT(1);
     PROTECT(tmp=allocVector(STRSXP,1));
-    STRING(tmp)[0]=mkChar(timestamp);
+    /* STRING(tmp)[0]=mkChar(timestamp);*/
+    SET_STRING_ELT(tmp,0,mkChar(timestamp));
     setAttrib(df,install("time.stamp"),tmp);
     UNPROTECT(1);
 
@@ -266,17 +280,20 @@ SEXP R_LoadStataData(FILE *fp)
         switch (abyte) {
 	case STATA_FLOAT:
 	case STATA_DOUBLE:
-	  VECTOR(df)[i]=allocVector(REALSXP,nobs);
-	  break;
+	    /* VECTOR(df)[i]=allocVector(REALSXP,nobs);*/
+	    SET_VECTOR_ELT(df,i,allocVector(REALSXP,nobs));
+	    break;
 	case STATA_INT:
 	case STATA_SHORTINT:
 	case STATA_BYTE:
-	    VECTOR(df)[i]=allocVector(INTSXP,nobs);
+	    /* VECTOR(df)[i]=allocVector(INTSXP,nobs);*/
+	    SET_VECTOR_ELT(df,i,allocVector(INTSXP,nobs));
 	    break;
 	default:
 	    if (abyte<STATA_STRINGOFFSET)
 	      error("Unknown data type");
-	    VECTOR(df)[i]=allocVector(STRSXP,nobs);
+	    /* VECTOR(df)[i]=allocVector(STRSXP,nobs);*/
+	    SET_VECTOR_ELT(df,i,allocVector(STRSXP,nobs));
 	    break;
 	}
     }
@@ -286,7 +303,8 @@ SEXP R_LoadStataData(FILE *fp)
     PROTECT(names=allocVector(STRSXP,nvar));
     for (i=0;i<nvar;i++){
         InStringBinary(fp,9,aname);
-        STRING(names)[i]=mkChar(nameMangle(aname,9));
+        /* STRING(names)[i]=mkChar(nameMangle(aname,9));*/
+	SET_STRING_ELT(names,i,mkChar(nameMangle(aname,9)));
     }
     setAttrib(df,R_NamesSymbol, names);
     
@@ -305,7 +323,8 @@ SEXP R_LoadStataData(FILE *fp)
     PROTECT(tmp=allocVector(STRSXP,nvar));
     for (i=0;i<nvar;i++){
         InStringBinary(fp,12,timestamp);
-	STRING(tmp)[i]=mkChar(timestamp);
+	/* STRING(tmp)[i]=mkChar(timestamp);*/
+	SET_STRING_ELT(tmp,i,mkChar(timestamp));
     }
     setAttrib(df,install("formats"),tmp);
     UNPROTECT(1);
@@ -325,12 +344,14 @@ SEXP R_LoadStataData(FILE *fp)
     if (version5){
         for(i=0;i<nvar;i++) {
             InStringBinary(fp,32,datalabel);
-	    STRING(varlabels)[i]=mkChar(datalabel);
+	    /* STRING(varlabels)[i]=mkChar(datalabel);*/
+	    SET_STRING_ELT(varlabels,i,mkChar(datalabel));
 	}
     } else {
         for(i=0;i<nvar;i++) {
             InStringBinary(fp,81,datalabel);
-	    STRING(varlabels)[i]=mkChar(datalabel);
+	    /* STRING(varlabels)[i]=mkChar(datalabel);*/
+	    SET_STRING_ELT(varlabels,i,mkChar(datalabel));
 	}
     }
     setAttrib(df, install("var.labels"), varlabels);
@@ -356,26 +377,27 @@ SEXP R_LoadStataData(FILE *fp)
         for(j=0;j<nvar;j++){
 	    switch (INTEGER(types)[j]) {
 	    case STATA_FLOAT:
-	        REAL(VECTOR(df)[j])[i]=(InFloatBinary(fp,0,swapends));
+		/* REAL(VECTOR(df)[j])[i]=(InFloatBinary(fp,0,swapends));*/
+		REAL(VECTOR_ELT(df,j))[i]=(InFloatBinary(fp,0,swapends));
 		break;
 	    case STATA_DOUBLE:
-	        REAL(VECTOR(df)[j])[i]=(InDoubleBinary(fp,0,swapends));
+	        REAL(VECTOR_ELT(df,j))[i]=(InDoubleBinary(fp,0,swapends));
 		break;
 	    case STATA_INT:
-	        INTEGER(VECTOR(df)[j])[i]=(InIntegerBinary(fp,0,swapends));
+	        INTEGER(VECTOR_ELT(df,j))[i]=(InIntegerBinary(fp,0,swapends));
 		break;
 	    case STATA_SHORTINT:
-	        INTEGER(VECTOR(df)[j])[i]=(InShortIntBinary(fp,0,swapends));
+	        INTEGER(VECTOR_ELT(df,j))[i]=(InShortIntBinary(fp,0,swapends));
 		break;
 	    case STATA_BYTE:
-	        INTEGER(VECTOR(df)[j])[i]=(int) InByteBinary(fp,0);
+	        INTEGER(VECTOR_ELT(df,j))[i]=(int) InByteBinary(fp,0);
 		break;
 	    default:
-	        charlen=INTEGER(types)[j]-0x7F;
+	        charlen=INTEGER(types)[j]-STATA_STRINGOFFSET;
 	        PROTECT(tmp=allocString(charlen+1));
 		InStringBinary(fp,charlen,CHAR(tmp));
 		CHAR(tmp)[charlen]=0;
-		STRING(VECTOR(df)[j])[i]=tmp;
+		SET_STRING_ELT(VECTOR_ELT(df,j),i,tmp);
 		UNPROTECT(1);
 	      break;
 	    }
@@ -387,7 +409,8 @@ SEXP R_LoadStataData(FILE *fp)
     PROTECT(row_names = allocVector(STRSXP, nobs));
     for (i=0; i<nobs; i++) {
         sprintf(datalabel, "%d", i+1);
-        STRING(row_names)[i] = mkChar(datalabel);
+        /*STRING(row_names)[i] = mkChar(datalabel);*/
+        SET_STRING_ELT(row_names,i,mkChar(datalabel));
     }
     setAttrib(df, R_RowNamesSymbol, row_names);
     UNPROTECT(1);     
@@ -409,7 +432,7 @@ SEXP do_readStata(SEXP call)
     if (!isValidString(fname = CADR(call)))
 	errorcall (call, "first argument must be a file name\n");
 
-    fp = fopen(R_ExpandFileName(CHAR(STRING(fname)[0])), "rb");
+    fp = fopen(R_ExpandFileName(CHAR(STRING_ELT(fname,0))), "rb");
     if (!fp)
 	errorcall(call, "unable to open file");
     result = R_LoadStataData(fp);
@@ -496,7 +519,7 @@ void R_SaveStataData(FILE *fp, SEXP df)
 
     nvar=length(df);
     OutShortIntBinary(nvar,fp);
-    nobs=length(VECTOR(df)[0]);
+    nobs=length(VECTOR_ELT(df,0));
     OutIntegerBinary(nobs,fp,1);  /* number of cases */
     OutStringBinary(datalabel,fp,81);   /* data label - zero terminated string */
     for(i=0;i<18;i++){
@@ -514,7 +537,7 @@ void R_SaveStataData(FILE *fp, SEXP df)
     PROTECT(types=allocVector(INTSXP,nvar));
 
     for(i=0;i<nvar;i++){
-      switch(TYPEOF(VECTOR(df)[i])){
+      switch(TYPEOF(VECTOR_ELT(df,i))){
         case LGLSXP:
         case INTSXP:
 	  OutByteBinary(STATA_INT,fp);
@@ -525,11 +548,11 @@ void R_SaveStataData(FILE *fp, SEXP df)
         case STRSXP:
 	  charlen=0;
 	  for(j=0;j<nobs;j++){
-	    k=length(STRING(VECTOR(df)[i])[j]);
+	    k=length(STRING_ELT(VECTOR_ELT(df,i),j));
 	    if (k>charlen)
 	      charlen=k;
 	  }
-	  OutByteBinary((unsigned char)(k+0x7f),fp);
+	  OutByteBinary((unsigned char)(k+STATA_STRINGOFFSET),fp);
 	  INTEGER(types)[i]=k;
 	  break;
 	default:
@@ -542,7 +565,7 @@ void R_SaveStataData(FILE *fp, SEXP df)
     
     PROTECT(names=getAttrib(df,R_NamesSymbol));
     for (i=0;i<nvar;i++){
- 	strncpy(aname,CHAR(STRING(names)[i]),8);
+ 	strncpy(aname,CHAR(STRING_ELT(names,i)),8);
         OutStringBinary(nameMangleOut(aname,8),fp,8);
 	OutByteBinary(0,fp);
     }
@@ -554,11 +577,12 @@ void R_SaveStataData(FILE *fp, SEXP df)
     for (i=0;i<2*(nvar+1);i++)
         OutByteBinary(0,fp);
     
-    /** format list: pick a format, any format   **/
-    /** we know that the string types are at most 128 characters
-	so we can't get a buffer overflow in sprintf **/
+    /** format list: arbitrarily write numbers as %9g format
+	but strings need accurate types */
     for (i=0;i<nvar;i++){
-        if (TYPEOF(VECTOR(df)[i])==STRSXP){
+        if (TYPEOF(VECTOR_ELT(df,i))==STRSXP){
+          /* string types are at most 128 characters
+              so we can't get a buffer overflow in sprintf **/	   
 	    sprintf(strformat,"%%%ds",INTEGER(types)[i]);
 	    OutStringBinary(strformat,fp,12);
 	} else { 
@@ -580,7 +604,7 @@ void R_SaveStataData(FILE *fp, SEXP df)
      
 
     for(i=0;i<nvar;i++) {
-        strncpy(datalabel,CHAR(STRING(names)[i]),81);
+        strncpy(datalabel,CHAR(STRING_ELT(names,i)),81);
 	datalabel[80]=(char) 0;
         OutStringBinary(datalabel,fp,81);
     }
@@ -600,19 +624,19 @@ void R_SaveStataData(FILE *fp, SEXP df)
 
     for(i=0;i<nobs;i++){
         for(j=0;j<nvar;j++){
-	    switch (TYPEOF(VECTOR(df)[j])) {
+	    switch (TYPEOF(VECTOR_ELT(df,j))) {
 	    case LGLSXP:
-	        OutIntegerBinary(LOGICAL(VECTOR(df)[j])[i],fp,0);
+	        OutIntegerBinary(LOGICAL(VECTOR_ELT(df,j))[i],fp,0);
 		break;
 	    case INTSXP:
-	        OutIntegerBinary(INTEGER(VECTOR(df)[j])[i],fp,0);
+	        OutIntegerBinary(INTEGER(VECTOR_ELT(df,j))[i],fp,0);
 		break;
 	    case REALSXP:
-	        OutDoubleBinary(REAL(VECTOR(df)[j])[i],fp,0);
+	        OutDoubleBinary(REAL(VECTOR_ELT(df,j))[i],fp,0);
 		break;
 	    case STRSXP:
-	        k=length(STRING(VECTOR(df)[j])[i]);
-	        OutStringBinary(CHAR(STRING(VECTOR(df)[j])[i]),fp,k);
+	        k=length(STRING_ELT(VECTOR_ELT(df,j),i));
+	        OutStringBinary(CHAR(STRING_ELT(VECTOR_ELT(df,j),i)),fp,k);
 		for(l=INTEGER(types)[j]-k;l>0;l--)
 		    OutByteBinary(0,fp);
 	        break;
@@ -640,7 +664,7 @@ SEXP do_writeStata(SEXP call)
 	errorcall (call, "first argument must be a file name\n");
 
 
-    fp = fopen(R_ExpandFileName(CHAR(STRING(fname)[0])), "wb");
+    fp = fopen(R_ExpandFileName(CHAR(STRING_ELT(fname,0))), "wb");
     if (!fp)
 	errorcall(call, "unable to open file");
  
